@@ -19,7 +19,7 @@
    You should have received a copy of the GNU Lesser General Public License
    along with plumed.  If not, see <http://www.gnu.org/licenses/>.
 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
-#include "ITS_Bias.h"
+#include "ITS_Bias_Test.h"
 
 namespace PLMD{
 namespace bias{
@@ -129,9 +129,9 @@ ITS_BIAS ...
 */
 //+ENDPLUMEDOC
 
-PLUMED_REGISTER_ACTION(ITS_Bias,"ITS_BIAS")
+PLUMED_REGISTER_ACTION(ITS_Bias_Test,"ITS_BIAS_TEST")
 
-void ITS_Bias::registerKeywords(Keywords& keys)
+void ITS_Bias_Test::registerKeywords(Keywords& keys)
 {
 	Bias::registerKeywords(keys);
 	keys.addOutputComponent("rbias","default","the revised bias potential using rct");
@@ -207,7 +207,7 @@ void ITS_Bias::registerKeywords(Keywords& keys)
 	keys.add("optional","ITERATE_LIMIT","to limit the iteration of fb value in variational in order to prevent the weight of higher temperatues become larger than the lower one");
 }
 
-ITS_Bias::~ITS_Bias()
+ITS_Bias_Test::~ITS_Bias_Test()
 {
 	if(!equiv_temp&&!is_const)
 	{
@@ -226,7 +226,7 @@ ITS_Bias::~ITS_Bias()
 		orbfb.close();
 }
 
-ITS_Bias::ITS_Bias(const ActionOptions& ao):
+ITS_Bias_Test::ITS_Bias_Test(const ActionOptions& ao):
 	PLUMED_BIAS_INIT(ao),update_start(0),rct(0),
 	step(0),norm_step(0),mcycle(0),iter_limit(0),
 	fb_init(0.0),fb_bias(0.0),rb_fac1(0.5),rb_fac2(0.0),step_size(1.0),
@@ -840,7 +840,7 @@ ITS_Bias::ITS_Bias(const ActionOptions& ao):
 	}
 }
 
-void ITS_Bias::calculate()
+void ITS_Bias_Test::calculate()
 {
 	if(only_bias)
 		energy=0;
@@ -855,8 +855,8 @@ void ITS_Bias::calculate()
 		for(unsigned i=0;i!=nbiases;++i)
 		{
 			tot_bias += bias_ratio[i] * bias_pntrs_[i]->getBias();
-			//~ if(bias_pntrs_[i]->isSetRct())
-				//~ tot_bias -= bias_pntrs_[i]->getRct();
+			if(bias_pntrs_[i]->isSetRct())
+				tot_bias -= bias_pntrs_[i]->getRct();
 		}
 		cv_energy += tot_bias;
 	}
@@ -1079,7 +1079,7 @@ void ITS_Bias::calculate()
 
 // The iterate process of rbfb
 // rbfb[k]=log[\sum_t(P_k)]
-inline void ITS_Bias::update_rbfb()
+inline void ITS_Bias_Test::update_rbfb()
 {
 	// the summation record the data of each the update steps (default=100)
 	if(norm_step==0)
@@ -1098,7 +1098,7 @@ inline void ITS_Bias::update_rbfb()
 // rbfb[k]=log[\sum_t(p_k)]; p_k=P_k/[\sum_k(P_k)];
 // The equivalence in variational iterate process:
 // rbfb[i]=log[(\sum_t(\beta*(\partial V_bias(U;a)/\partial a_i)))_V(a)]
-inline void ITS_Bias::update_rbfb_direct()
+inline void ITS_Bias_Test::update_rbfb_direct()
 {
 	//~ if(step%update_step==update_start)
 	if(norm_step==0)
@@ -1113,7 +1113,7 @@ inline void ITS_Bias::update_rbfb_direct()
 	}
 }
 
-void ITS_Bias::mw_merge_rbfb()
+void ITS_Bias_Test::mw_merge_rbfb()
 {
 	multi_sim_comm.Sum(norm_step);
 	
@@ -1150,7 +1150,7 @@ void ITS_Bias::mw_merge_rbfb()
 }
 
 // Y. Q. Gao, J. Chem. Phys. 128, 134111 (2008)
-void ITS_Bias::fb_iteration()
+void ITS_Bias_Test::fb_iteration()
 {
 	if(is_direct)
 	{
@@ -1262,7 +1262,7 @@ void ITS_Bias::fb_iteration()
 		plumed_merror("FB value become NaN. See debug file or \"error.data\" file for detailed information.");
 }
 
-void ITS_Bias::fb_variational()
+void ITS_Bias_Test::fb_variational()
 {	
 	// The average of 1st order drivative of bias potential in simulation
 	std::vector<double> deriv_aver;
@@ -1400,7 +1400,7 @@ void ITS_Bias::fb_variational()
 		plumed_merror("FB value become NaN. See debug file or \"error.data\" file for detailed information.");
 }
 
-void ITS_Bias::output_fb()
+void ITS_Bias_Test::output_fb()
 {
 	if(mcycle%fb_stride==0)
 	{
@@ -1496,7 +1496,7 @@ void ITS_Bias::output_fb()
 		output_bias();
 }
 
-unsigned ITS_Bias::find_rw_id(double rwtemp,double& dtl,double& dth)
+unsigned ITS_Bias_Test::find_rw_id(double rwtemp,double& dtl,double& dth)
 {
 	if(rwtemp<templ)
 		plumed_merror("the reweight temperature is lower than the minimal temperature of ITS");
@@ -1520,7 +1520,7 @@ unsigned ITS_Bias::find_rw_id(double rwtemp,double& dtl,double& dth)
 	return rwid;
 }
 
-double ITS_Bias::find_rw_fb(unsigned rwid,double dtl,double dth)
+double ITS_Bias_Test::find_rw_fb(unsigned rwid,double dtl,double dth)
 {
 	double fbl=fb[rwid];
 	double fbh=fb[rwid+1];
@@ -1534,14 +1534,14 @@ double ITS_Bias::find_rw_fb(unsigned rwid,double dtl,double dth)
 	return rwfb;
 }
 
-double ITS_Bias::find_rw_fb(double rwtemp)
+double ITS_Bias_Test::find_rw_fb(double rwtemp)
 {
 	double dtl,dth;
 	unsigned rwid=find_rw_id(rwtemp,dtl,dth);
 	return find_rw_fb(rwid,dtl,dth);
 }
 
-void ITS_Bias::setupOFile(std::string& file_name, OFile& ofile, const bool multi_sim_single_files)
+void ITS_Bias_Test::setupOFile(std::string& file_name, OFile& ofile, const bool multi_sim_single_files)
 {
     ofile.link(*this);
     std::string fname=file_name;
@@ -1559,7 +1559,7 @@ void ITS_Bias::setupOFile(std::string& file_name, OFile& ofile, const bool multi
     ofile.setHeavyFlush();
 }
 
-void ITS_Bias::setupOFiles(std::vector<std::string>& fnames, std::vector<OFile*>& OFiles, const bool multi_sim_single_files)
+void ITS_Bias_Test::setupOFiles(std::vector<std::string>& fnames, std::vector<OFile*>& OFiles, const bool multi_sim_single_files)
 {
 	OFiles.resize(fnames.size(),NULL);
 	for(unsigned i=0; i!=fnames.size();++i)
@@ -1581,7 +1581,7 @@ void ITS_Bias::setupOFiles(std::vector<std::string>& fnames, std::vector<OFile*>
 	}
 }
 
-unsigned ITS_Bias::read_fb_file(const std::string& fname,double& _kB,double& _peshift)
+unsigned ITS_Bias_Test::read_fb_file(const std::string& fname,double& _kB,double& _peshift)
 {	
 	IFile ifb;
     ifb.link(*this);
@@ -1813,7 +1813,7 @@ unsigned ITS_Bias::read_fb_file(const std::string& fname,double& _kB,double& _pe
 	return read_count;
 }
 
-void ITS_Bias::change_peshift(double new_shift)
+void ITS_Bias_Test::change_peshift(double new_shift)
 {
 	fb_rescale(new_shift-peshift);
 	if(is_ves)
@@ -1822,13 +1822,13 @@ void ITS_Bias::change_peshift(double new_shift)
 	set_peshift_ratio();
 }
 
-void ITS_Bias::set_peshift_ratio()
+void ITS_Bias_Test::set_peshift_ratio()
 {
 	for(unsigned i=0;i!=nreplica-1;++i)
 		peshift_ratio[i]=(betak[i]-betak[i+1])*peshift;
 }
 
-void ITS_Bias::output_bias()
+void ITS_Bias_Test::output_bias()
 {
 	std::string smcycle;
 	Tools::convert(int(mcycle),smcycle);
@@ -1879,7 +1879,7 @@ void ITS_Bias::output_bias()
 	obias.close();
 }
 
-double ITS_Bias::calc_deriv2()
+double ITS_Bias_Test::calc_deriv2()
 {
 	deriv2_ps.assign(nreplica*(nreplica+1)/2,0);
 	double complete=0;
@@ -1913,7 +1913,7 @@ double ITS_Bias::calc_deriv2()
 	return complete;
 }
 
-std::vector<double> ITS_Bias::omega2_alpha(const std::vector<std::vector<double> >& hessian,const std::vector<double>& dalpha)
+std::vector<double> ITS_Bias_Test::omega2_alpha(const std::vector<std::vector<double> >& hessian,const std::vector<double>& dalpha)
 {
 	std::vector<double> result;
 	for(unsigned i=0;i!=hessian.size();++i)
@@ -1926,7 +1926,7 @@ std::vector<double> ITS_Bias::omega2_alpha(const std::vector<std::vector<double>
 	return result;
 }
 
-std::vector<double> ITS_Bias::omega2_alpha(const std::vector<double>& hessian,const std::vector<double>& dalpha)
+std::vector<double> ITS_Bias_Test::omega2_alpha(const std::vector<double>& hessian,const std::vector<double>& dalpha)
 {
 	std::vector<double> result;
 	for(unsigned i=0;i!=dalpha.size();++i)
