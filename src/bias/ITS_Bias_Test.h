@@ -57,6 +57,7 @@ private:
 	double kBT;
 	double kBT_target;
 	double beta0;
+	double ratio_energy;
 	double beta_target;
 	double target_temp;
 	double sim_temp;
@@ -76,7 +77,10 @@ private:
 	std::vector<double> betak;
 
 	std::vector<double> fb;
+	std::vector<double> fb_rct;
 	std::vector<double> norml;
+	std::vector<double> fb_ratios;
+	std::vector<double> rbfb_ratios;
 
 	std::vector<double> gU;
 	std::vector<double> gf;
@@ -95,6 +99,7 @@ private:
 	std::vector<double> rw_dth;
 	std::vector<double> rw_dtl;
 	std::vector<double> rw_rct;
+	std::vector<double> rw_fb_ratios;
 	std::vector<unsigned> rw_rctid;
 	std::vector<unsigned> pot_dis;
 	std::vector<std::string> rw_tstr;
@@ -140,6 +145,7 @@ private:
 	bool potdis_output;
 	bool bias_linked;
 	bool only_bias;
+	bool is_read_ratio;
 	bool auto_peshift;
 	bool is_unlinear;
 	bool is_set_temps;
@@ -149,6 +155,7 @@ private:
 	bool read_fb;
 	bool read_iter;
 	bool fbtrj_output;
+	bool no_bias_rct;
 	//~ bool norm_output;
 	//~ bool peshift_output;
 	unsigned update_step;
@@ -197,6 +204,8 @@ private:
 	double sim_dtl;
 	double sim_dth;
 	double logN;
+	double ratio_norm;
+	double fb_ratio0;
 
 	unsigned ntarget;
 	double ener_min;
@@ -248,8 +257,10 @@ public:
 	void calculate();
 	double calc_bias(double _beta) const
 		{return -gfsum/_beta-shift_energy;}
+	double calc_rct(double _beta,double _fb,double _fb_ratio) const
+		{return (_fb_ratio-_fb)/_beta;}
 	double calc_rct(double _beta,double _fb) const
-		{return -(_fb+logN)/_beta;}
+		{return (-logN-_fb)/_beta;}
 	static void registerKeywords(Keywords& keys);
 };
 

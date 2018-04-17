@@ -24,7 +24,7 @@
 namespace PLMD{
 namespace bias{
 
-//+PLUMEDOC BIAS ITS_BIAS
+//+PLUMEDOC BIAS ITS_Bias_Test
 /*
 Used to perform integrated tempering sampling (ITS) molecular dynamics
 simulation on potential energy of the system or bias potential of CVs.
@@ -86,7 +86,7 @@ c_0 = e^{\beta_0(U - U^{\text{eff}})} =
 \verbatim
 energy: ENERGY
 
-ITS_BIAS ...
+ITS_Bias_Test ...
   LABEL=its
   ARG=energy
   NREPLICA=100
@@ -99,7 +99,7 @@ ITS_BIAS ...
   FB_STRIDE=100
   FBTRJ_FILE=fbtrj.data
   FBTRJ_STRIDE=20
-... ITS_BIAS
+... ITS_Bias_Test
 \endverbatim
 
 \verbatim
@@ -109,7 +109,7 @@ DISTANCE ATOMS=3,5 LABEL=d1
 DISTANCE ATOMS=2,4 LABEL=d2
 METAD ARG=d1,d2 SIGMA=0.2,0.2 HEIGHT=0.3 PACE=500 LABEL=restraint
 
-ITS_BIAS ...
+ITS_Bias_Test ...
   LABEL=its
   ARG=energy
   BIAS=restraint
@@ -123,7 +123,7 @@ ITS_BIAS ...
   FB_STRIDE=100
   FBTRJ_FILE=fbtrj.data
   FBTRJ_STRIDE=20
-... ITS_BIAS
+... ITS_Bias_Test
 \endverbatim
 
 */
@@ -168,12 +168,14 @@ void ITS_Bias_Test::registerKeywords(Keywords& keys)
 	keys.addFlag("PESHIFT_AUTO_ADJUST",false,"automatically adjust the PESHIFT value during the fb iteration");
 	keys.addFlag("UNLINEAR_REPLICAS",false,"to setup the segments of temperature be propotional to the temperatues. If you setup the REPLICA_RATIO_MIN value, this term will be automatically opened.");
 	keys.addFlag("DIRECT_AVERAGE",false,"to directly calculate the average of rbfb value in each step (only be used in traditional iteration process)");
+	keys.addFlag("NOT_USE_BIAS_RCT",false,"do not use the c(t) of bias to modify the bias energy when using bias as the input CVs");
 
 	keys.add("optional","START_CYCLE","the start step for fb updating");
 	keys.add("optional","FB_INIT","( default=0.0 ) the default value for fb initializing");
 	keys.add("optional","RB_FAC1","( default=0.5 ) the ratio of the average value of rb");
 	keys.add("optional","RB_FAC2","( default=0.0 ) the ratio of the old steps in rb updating");
 	keys.add("optional","STEP_SIZE","( default=1.0 )the step size of fb iteration");
+	keys.add("optional","TARGET_RATIO_ENERGY","( default=0 ) the energy to adjust the ratio of each temperatures during the iteration");
 
 	keys.add("optional","FB_FILE","( default=fb.data ) a file to record the new fb values when they are update");
 	keys.add("optional","FB_STRIDE","( default=1 ) the frequency to output the new fb values");
@@ -227,13 +229,13 @@ ITS_Bias_Test::~ITS_Bias_Test()
 }
 
 ITS_Bias_Test::ITS_Bias_Test(const ActionOptions& ao):
-	PLUMED_BIAS_INIT(ao),update_start(0),rct(0),
+	PLUMED_BIAS_INIT(ao),update_start(0),ratio_energy(0),rct(0),
 	step(0),norm_step(0),mcycle(0),iter_limit(0),
 	fb_init(0.0),fb_bias(0.0),rb_fac1(0.5),rb_fac2(0.0),step_size(1.0),
 	is_const(false),rw_output(false),is_ves(false),
 	read_norm(false),only_1st(false),bias_output(false),
 	rbfb_output(false),is_debug(false),potdis_output(false),
-	bias_linked(false),only_bias(false),
+	bias_linked(false),only_bias(false),is_read_ratio(false),
 	is_set_temps(false),is_set_ratios(false),is_norm_rescale(false),
 	read_fb(false),read_iter(false),fbtrj_output(false),start_cycle(0),
 	fb_stride(1),bias_stride(1),potdis_step(1),rctid(0),
@@ -279,6 +281,7 @@ ITS_Bias_Test::ITS_Bias_Test(const ActionOptions& ao):
 	parseFlag("PESHIFT_AUTO_ADJUST",auto_peshift);
 	parseFlag("UNLINEAR_REPLICAS",is_unlinear);
 	parseFlag("DIRECT_AVERAGE",is_direct);
+	parseFlag("NOT_USE_BIAS_RCT",no_bias_rct);
 	parse("PESHIFT",peshift);
 	parse("FB_READ_FILE",fb_input);
 	fb_file="fb.data";
@@ -298,6 +301,7 @@ ITS_Bias_Test::ITS_Bias_Test(const ActionOptions& ao):
 		is_set_temps=true;
 	parse("RATIO_MIN",_ratiol);
 	parse("RATIO_MAX",_ratioh);
+	parse("TARGET_RATIO_ENERGY",ratio_energy);
 	
 	if(_ratiol>0||_ratioh>0)
 	{
@@ -437,6 +441,32 @@ ITS_Bias_Test::ITS_Bias_Test(const ActionOptions& ao):
 	for(unsigned i=0;i!=nreplica;++i)
 		betak.push_back(1.0/(kB*int_temps[i]));
 
+	logN=std::log(double(nreplica));
+	ratio_norm=logN;
+	fb_ratio0=-logN;
+	// the target distribution of P'_k=Z_k/\sum_i Z_i
+	fb_ratios.assign(nreplica,-logN);
+	// the target ratio of the two neighor distribution R_k=P'_{k+1}/P'_{k}
+	rbfb_ratios.assign(nreplica,0);
+	
+	if(fabs(ratio_energy)>1.0e-15)
+	{
+		double ratio1=-ratio_energy*betak[0];
+		ratio_norm=ratio1;
+		fb_ratios[0]=ratio1;
+		for(unsigned i=1;i!=nreplica;++i)
+		{
+			double ratio_value=-ratio_energy*betak[i];
+			fb_ratios[i]=ratio_value;
+			exp_added(ratio_norm,ratio_value);
+			rbfb_ratios[i-1]=fb_ratios[i]-fb_ratios[i-1];
+		}
+		fb_ratio0=-ratio_energy*beta0-ratio_norm;
+		
+		for(unsigned i=0;i!=nreplica;++i)
+			fb_ratios[i]-=ratio_norm;
+	}
+
 	target_temp=sim_temp;
 	parse("TARGET_TEMP",target_temp);
 	if(equiv_temp)
@@ -466,8 +496,6 @@ ITS_Bias_Test::ITS_Bias_Test(const ActionOptions& ao):
 		fb_bias=std::log(step_size);
 	}
 	
-	logN=std::log(double(nreplica));
-	
 	if(!read_norm)
 		norml.assign(nreplica,0);
 	
@@ -475,6 +503,7 @@ ITS_Bias_Test::ITS_Bias_Test(const ActionOptions& ao):
 	gf.assign(nreplica,0);
 	bgf.assign(nreplica,0);
 	rbfb.assign(nreplica,0);
+	fb_rct.assign(nreplica,0);
 	peshift_ratio.assign(nreplica,0);
 
 	parse("PACE",update_step);
@@ -501,8 +530,6 @@ ITS_Bias_Test::ITS_Bias_Test(const ActionOptions& ao):
 	//~ if(peshift_trj.size()>0)
 		//~ peshift_output=true;
 	
-
-	
 	// s(k)=exp(\beta_k*E_shift)/exp(\beta_{k+1}*E_shift)
 	// s(k)=exp[(\beta_k-\beta_{k+1})*E_shift]
 	set_peshift_ratio();
@@ -524,6 +551,7 @@ ITS_Bias_Test::ITS_Bias_Test(const ActionOptions& ao):
 		ofb.addConstantField("PESHIFT");
 		ofb.addConstantField("COEFFICIENT_TYPE");
 		ofb.addConstantField("NREPLICA");
+		ofb.addConstantField("TARGET_RATIO_ENERGY");
 		if(is_ves&&!only_1st)
 		{
 			ofb.addConstantField("ENERGY_MIN");
@@ -625,7 +653,7 @@ ITS_Bias_Test::ITS_Bias_Test(const ActionOptions& ao):
 	
 	rctid=find_rw_id(sim_temp,sim_dtl,sim_dth);
 	fb0=find_rw_fb(rctid,sim_dtl,sim_dth);
-	rct=calc_rct(beta0,fb0);
+	rct=calc_rct(beta0,fb0,fb_ratio0);
 	
 	addComponent("rbias"); componentIsNotPeriodic("rbias");
 	valueRBias=getPntrToComponent("rbias");
@@ -648,6 +676,7 @@ ITS_Bias_Test::ITS_Bias_Test(const ActionOptions& ao):
 		rw_rctid.resize(rw_temp.size());
 		rw_dth.resize(rw_temp.size());
 		rw_dtl.resize(rw_temp.size());
+		rw_fb_ratios.resize(rw_temp.size());
 		for(unsigned i=0;i!=rw_temp.size();++i)
 		{
 			if(rw_temp[i]<=temph&&rw_temp[i]>=templ)
@@ -656,9 +685,10 @@ ITS_Bias_Test::ITS_Bias_Test(const ActionOptions& ao):
 				plumed_merror("the reweighting temperature must between TEMP_MIN and TEMP_MAX");
 			rw_rctid[i]=find_rw_id(rw_temp[i],rw_dtl[i],rw_dth[i]);
 			rw_fb[i]=find_rw_fb(rw_rctid[i],rw_dtl[i],rw_dth[i]);
-			rw_rct[i]=calc_rct(rw_beta[i],rw_fb[i]);
+			rw_rct[i]=calc_rct(rw_beta[i],rw_fb[i],fb_ratios[i]);
+			rw_fb_ratios[i]=-ratio_energy*rw_beta[i]-ratio_norm;
 		}
-		
+
 		rw_factor.resize(rw_temp.size());
 		valueRwbias.resize(rw_temp.size());
 		for(unsigned i=0;i!=rw_temp.size();++i)
@@ -700,6 +730,8 @@ ITS_Bias_Test::ITS_Bias_Test(const ActionOptions& ao):
 	log.printf("  with simulation temperature: %f\n",sim_temp);
 	log.printf("  with boltzmann constant: %f\n",kB);
 	log.printf("  wiht beta (1/kT): %f\n",beta0);
+	log.printf("  wiht target ratio energy: %f\n",ratio_energy);
+	log.printf("  wiht fb ratio at simulation temperature (%f): %f\n",sim_temp, fb_ratio0);
 	
 	if(equiv_temp)
 	{
@@ -718,6 +750,10 @@ ITS_Bias_Test::ITS_Bias_Test(const ActionOptions& ao):
 				log.printf("  linked with %d biases:\n",nbiases);
 			for(unsigned i=0;i!=nbiases;++i)
 				log.printf("    Bias %d: %s with ratio %f\n",i+1,bias_labels[i].c_str(),bias_ratio[i]);
+			if(no_bias_rct)
+				log.printf("    without using the c(t) of the bias\n");
+			else
+				log.printf("    using the c(t) of the bias if necessary.\n");
 		}
 		log.printf("  with basic parameters:\n");
 		log.printf("    FB_INIT: %f\n",fb_init);
@@ -742,15 +778,15 @@ ITS_Bias_Test::ITS_Bias_Test(const ActionOptions& ao):
 
 		if(read_norm)
 		{
-			log.printf("  with temperatue and FB value: (index T_k gamma_k beta_k fb norml)\n");
+			log.printf("  with temperatue and FB value: (index T_k gamma_k beta_k P'_k fb norml)\n");
 			for(unsigned i=0;i!=nreplica;++i)
-				log.printf("    %d\t%f\t%f\t%f\t%f\t%f\n",i,int_temps[i],int_ratios[i],betak[i],fb[i],norml[i]);
+				log.printf("    %d\t%f\t%f\t%f\t%f\t%f\t%f\n",i,int_temps[i],int_ratios[i],betak[i],fb_ratios[i],fb[i],norml[i]);
 		}
 		else
 		{
-			log.printf("  with temperatue and FB value: (index[k] T_k gamma_k beta_k fb_k)\n");
+			log.printf("  with temperatue and FB value: (index[k] T_k gamma_k beta_k P'_k fb_k)\n");
 			for(unsigned i=0;i!=nreplica;++i)
-				log.printf("    %d\t%f\t%f\t%f\t%f\n",i,int_temps[i],int_ratios[i],betak[i],fb[i]);
+				log.printf("    %d\t%f\t%f\t%f\t%f\t%f\n",i,int_temps[i],int_ratios[i],betak[i],fb_ratios[i],fb[i]);
 		}
 		log.printf("    with temperatues of FB from %f to %f\n",templ,temph);
 		log.printf("    with ratio of replica from %f to %f\n",ratiol,ratioh);
@@ -816,7 +852,7 @@ ITS_Bias_Test::ITS_Bias_Test(const ActionOptions& ao):
 		{
 			log.printf("    with reweighting factor at temperature:\n");
 			for(unsigned i=0;i!=rw_temp.size();++i)
-				log.printf("    %d\t%fK(%f) fit at %d-th temperature with %f and %f\n",int(i),rw_temp[i],rw_beta[i],int(rw_rctid[i]),rw_dtl[i],rw_dth[i]);
+				log.printf("    %d\t%fK(%f) fit at %d-th temperature with target ratio %f\n",int(i),rw_temp[i],rw_beta[i],int(rw_rctid[i]),rw_fb_ratios[i]);
 		}
 		if(is_debug)
 			log.printf("  Using debug mod with output file: %s\n",debug_file.c_str());
@@ -855,7 +891,7 @@ void ITS_Bias_Test::calculate()
 		for(unsigned i=0;i!=nbiases;++i)
 		{
 			tot_bias += bias_ratio[i] * bias_pntrs_[i]->getBias();
-			if(bias_pntrs_[i]->isSetRct())
+			if((!no_bias_rct)&&bias_pntrs_[i]->isSetRct())
 				tot_bias -= bias_pntrs_[i]->getRct();
 		}
 		cv_energy += tot_bias;
@@ -1051,13 +1087,16 @@ void ITS_Bias_Test::calculate()
 				fb_iteration();
 			
 			fb0=find_rw_fb(rctid,sim_dtl,sim_dth);
-			rct=calc_rct(beta0,fb0);
+			rct=calc_rct(beta0,fb0,fb_ratio0);
 			setRct(rct);
+			
+			for(unsigned i=0;i!=nreplica;++i)
+				fb_rct[i]=calc_rct(betak[i],fb[i]);
 			
 			if(rw_output)
 			{
 				for(unsigned i=0;i!=rw_rct.size();++i)
-					rw_rct[i]=calc_rct(rw_beta[i],find_rw_fb(rw_rctid[i],rw_dtl[i],rw_dth[i]));
+					rw_rct[i]=calc_rct(rw_beta[i],find_rw_fb(rw_rctid[i],rw_dtl[i],rw_dth[i]),rw_fb_ratios[i]);
 			}
 			
 			if(is_debug)
@@ -1078,7 +1117,7 @@ void ITS_Bias_Test::calculate()
 }
 
 // The iterate process of rbfb
-// rbfb[k]=log[\sum_t(P_k)]
+// rbfb[k]=log[\sum_t(Z_k)]
 inline void ITS_Bias_Test::update_rbfb()
 {
 	// the summation record the data of each the update steps (default=100)
@@ -1095,7 +1134,7 @@ inline void ITS_Bias_Test::update_rbfb()
 }
 
 // The iterate process of rbfb
-// rbfb[k]=log[\sum_t(p_k)]; p_k=P_k/[\sum_k(P_k)];
+// rbfb[k]=log[\sum_t(P_k)]; P_k=Z_k/[\sum_k(Z_k)];
 // The equivalence in variational iterate process:
 // rbfb[i]=log[(\sum_t(\beta*(\partial V_bias(U;a)/\partial a_i)))_V(a)]
 inline void ITS_Bias_Test::update_rbfb_direct()
@@ -1175,26 +1214,26 @@ void ITS_Bias_Test::fb_iteration()
 			norml[i]=(rbfb[i]+rbfb[i+1])*rb_fac1;
 			// m_k(0)=n_k(0)/n_{k+1}(0)
 			double ratio_old=fb[i]-fb[i+1];
-			// m_k(1)={m'}_k(1)=m_k(0)*p_k(0)/p_{k+1}(0)
-			ratio.push_back(ratio_old+rbfb[i+1]-rbfb[i]);
+			// m_k(1)={m'}_k(1)=m_k(0)*P_k(0)/P_{k+1}(0)/R_k(0)
+			ratio.push_back(ratio_old+rbfb[i+1]-rbfb[i]-rbfb_ratios[i]);
 		}
 	}
 	else
 	{
 		for(unsigned i=0;i!=nreplica-1;++i)
 		{
-			// rb=log[f(p_k,p_{k+1};t)]
-			// f(p_k,p_{k+1};t)=(p_k(t)*p_{k+1}(t))^c1+t*c2
-			// (default f(p_k,p_{k+1};t)=\sqrt[p_k(t)*p_{k+1}(t)])
+			// rb=log[f(P_k,P_{k+1};t)]
+			// f(P_k,P_{k+1};t)=(P_k(t)*P_{k+1}(t))^c1+t*c2
+			// (default f(P_k,P_{k+1};t)=\sqrt[P_k(t)*P_{k+1}(t)])
 			double rb=(rbfb[i]+rbfb[i+1])*rb_fac1+(mcycle-1)*rb_fac2;
 			// ratio_old=log[m_k(t-1)], m_k=n_k/n_{k+1}
 			// (Notice that m_k in the paper equal to n_{k+1}/n_k)
-			double ratio_old=fb[i]-fb[i+1]-peshift_ratio[i];
-			// ratio_new=log[{m'}_k(t)]=log[m_k(t-1)*p_{k+1}/p_{k}], if p_{k+1}/p_{k}=1, m_k(t)=m_k(t-1)
-			double ratio_new=ratio_old+rbfb[i+1]-rbfb[i];
+			double ratio_old=fb[i]-fb[i+1];
+			// ratio_new=log[{m'}_k(t)]=log[m_k(t-1)*P_{k+1}/P_{k}//R_k], if P_{k+1}/P_{k}=R_k, m_k(t)=m_k(t-1)
+			double ratio_new=ratio_old+rbfb[i+1]-rbfb[i]-rbfb_ratios[i];
 
 			// normal=log[W_k(t)], normalold=log[W_k(t-1)]
-			// W_k(t)=\sum_t[f(p_k,p_{k+1})]=W_k(t-1)+f(p_k,p_{k+1};t)
+			// W_k(t)=\sum_t[f(P_k,P_{k+1})]=W_k(t-1)+f(P_k,P_{k+1};t)
 			// the summation record the data of ALL the update steps
 			double normlold=norml[i];
 			exp_added(norml[i],rb);
@@ -1202,15 +1241,15 @@ void ITS_Bias_Test::fb_iteration()
 			// Rescaled normalization factor
 			double rationorm=norml[i];
 			// the weight of new ratio
-			// w_k(t)=c_bias*f(p_k,p_{k+1};t)
+			// w_k(t)=c_bias*f(P_k,P_{k+1};t)
 			double weight=fb_bias+rb;
 			// Wr_k(t)=W_k(t-1)+w_k(t)
 			if(is_norm_rescale)
 				rationorm=exp_add(normlold,weight);
 
-			// m_k(t)=[m_k(t-1)*c_bias*f(p_k,p_{k+1};t)*p_k(t)/p_{k+1}(t)+m_k(t-1)*W_k(t-1)]/Wr_k(t)
+			// m_k(t)=[m_k(t-1)*c_bias*f(P_k,P_{k+1};t)*P_k(t)/P_{k+1}(t)+m_k(t-1)*W_k(t-1)]/Wr_k(t)
 			// m_k(t)=[{m'}_k(t)*w_k(t)+m_k(t-1)*W_k(t-1)]/Wr_k(t)
-			ratio.push_back(exp_add(weight+ratio_new,normlold+ratio_old)-rationorm+peshift_ratio[i]);
+			ratio.push_back(exp_add(weight+ratio_new,normlold+ratio_old)-rationorm);
 		}
 	}
 
@@ -1413,6 +1452,7 @@ void ITS_Bias_Test::output_fb()
 		ofb.printField("PESHIFT",peshift);
 		ofb.printField("COEFFICIENT_TYPE",(is_set_temps?"TEMPERATURE":"RATIO"));
 		ofb.printField("NREPLICA",int(nreplica));
+		ofb.printField("TARGET_RATIO_ENERGY",ratio_energy);
 		if(is_ves&&!only_1st)
 		{
 			ofb.printField("ENERGY_MIN",ener_min);
@@ -1439,6 +1479,7 @@ void ITS_Bias_Test::output_fb()
 			}
 			else
 				ofb.printField("norm_value",norml[i]);
+			ofb.printField("rct_value",fb_rct[i]);
 			ofb.printField();
 		}
 		ofb.printf("#!-----END-OF-FB-COEFFICIENTS-----\n\n");
@@ -1643,6 +1684,9 @@ unsigned ITS_Bias_Test::read_fb_file(const std::string& fname,double& _kB,double
 			ifb.scanField("NREPLICA",int_ntemp);
 			_ntemp=int_ntemp;
 		}
+		
+		if(ifb.FieldExist("TARGET_RATIO_ENERGY"))
+			ifb.scanField("TARGET_RATIO_ENERGY",ratio_energy);
 		
 		int_ratios.resize(_ntemp);
 		int_temps.resize(_ntemp);
