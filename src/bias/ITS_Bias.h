@@ -155,6 +155,7 @@ private:
 	bool read_fb;
 	bool read_iter;
 	bool fbtrj_output;
+	bool rct_output;
 	bool no_bias_rct;
 	//~ bool norm_output;
 	//~ bool peshift_output;
@@ -162,6 +163,7 @@ private:
 	unsigned start_cycle;
 	unsigned fb_stride;
 	unsigned fbtrj_stride;
+	unsigned rct_stride;
 	unsigned bias_stride;
 	unsigned bias_bins;
 	unsigned potdis_num;
@@ -182,6 +184,7 @@ private:
 	std::string debug_file;
 	std::string potdis_file;
 	std::string rbfb_file;
+	std::string rct_file;
 
 	OFile ofb;
 	OFile ofbtrj;
@@ -191,6 +194,7 @@ private:
 	OFile ofw;
 	OFile obias;
 	OFile orbfb;
+	OFile orct;
 	OFile odebug;
 	OFile opotdis;
 

@@ -137,9 +137,9 @@ void ITS_Bias::registerKeywords(Keywords& keys)
 	keys.addOutputComponent("rbias","default","the revised bias potential using rct");
 	keys.addOutputComponent("energy","default","the instantaneous value of the potential energy of the system");
 	keys.addOutputComponent("rct","default","the reweighting revise factor");
+	keys.addOutputComponent("force","default","the instantaneous value of the bias force");
 	//~ keys.addOutputComponent("rbias_T","RW_TEMP","the revised bias potential at different temperatures");
 	keys.addOutputComponent("effective","DEBUG_FILE","the instantaneous value of the effective potential");
-	keys.addOutputComponent("force","DEBUG_FILE","the instantaneous value of the bias force");
 	keys.addOutputComponent("rwfb","DEBUG_FILE","the revised bias potential using rct");
 	ActionWithValue::useCustomisableComponents(keys);
 	keys.remove("ARG");
@@ -176,6 +176,8 @@ void ITS_Bias::registerKeywords(Keywords& keys)
 	keys.add("optional","RB_FAC2","( default=0.0 ) the ratio of the old steps in rb updating");
 	keys.add("optional","STEP_SIZE","( default=1.0 )the step size of fb iteration");
 	keys.add("optional","TARGET_RATIO_ENERGY","( default=0 ) the energy to adjust the ratio of each temperatures during the iteration");
+	keys.add("optional","RCT_FILE","the file to output the c(t)");
+	keys.add("optional","RCT_STRIDE","the frequency to output the c(t)");
 
 	keys.add("optional","FB_FILE","( default=fb.data ) a file to record the new fb values when they are update");
 	keys.add("optional","FB_STRIDE","( default=1 ) the frequency to output the new fb values");
@@ -215,6 +217,8 @@ ITS_Bias::~ITS_Bias()
 	{
 		ofb.close();
 		ofbtrj.close();
+		if(rct_output)
+			orct.close();
 		//~ onormtrj.close();
 		//~ opstrj.close();
 		//~ if(is_ves)
@@ -237,8 +241,8 @@ ITS_Bias::ITS_Bias(const ActionOptions& ao):
 	rbfb_output(false),is_debug(false),potdis_output(false),
 	bias_linked(false),only_bias(false),is_read_ratio(false),
 	is_set_temps(false),is_set_ratios(false),is_norm_rescale(false),
-	read_fb(false),read_iter(false),fbtrj_output(false),start_cycle(0),
-	fb_stride(1),bias_stride(1),potdis_step(1),rctid(0),
+	read_fb(false),read_iter(false),fbtrj_output(false),rct_output(false),
+	start_cycle(0),fb_stride(1),bias_stride(1),potdis_step(1),rctid(0),
 	min_ener(1e38),pot_bin(1),dU(1),dvp2_complete(0)
 {
 	if(getNumberOfArguments()==0)
@@ -444,9 +448,9 @@ ITS_Bias::ITS_Bias(const ActionOptions& ao):
 	logN=std::log(double(nreplica));
 	ratio_norm=logN;
 	fb_ratio0=-logN;
-	// the target distribution of P'_k=Z_k/\sum_i Z_i
+	// the target distribution of P'_k=Z_k/\sum_i Z_i, default value is 1/N
 	fb_ratios.assign(nreplica,-logN);
-	// the target ratio of the two neighor distribution R_k=P'_{k+1}/P'_{k}
+	// the target ratio of the two neighor distribution R_k=P'_{k+1}/P'_{k}, default value is 1:1
 	rbfb_ratios.assign(nreplica,0);
 	
 	if(fabs(ratio_energy)>1.0e-15)
@@ -517,6 +521,12 @@ ITS_Bias::ITS_Bias(const ActionOptions& ao):
 		fbtrj_output=true;
 	fbtrj_stride=fb_stride;
 	parse("FBTRAJ_STRIDE",fbtrj_stride);
+	
+	parse("RCT_FILE",rct_file);
+	if(rct_file.size()>0)
+		rct_output=true;
+	rct_stride=fb_stride;
+	parse("RCT_STRIDE",rct_stride);
 
 	//~ parse("NORM_TRAJ",norm_trj);
 	//~ parse("ITER_TRAJ",iter_trj);
@@ -720,10 +730,10 @@ ITS_Bias::ITS_Bias(const ActionOptions& ao):
 		valueEff=getPntrToComponent("effective");
 		addComponent("rwfb"); componentIsNotPeriodic("rwfb");
 		valueRwfb=getPntrToComponent("rwfb");
-		addComponent("force"); componentIsNotPeriodic("force");
-		valueForce=getPntrToComponent("force");
 		valueRwfb->set(fb0);
 	}
+	addComponent("force"); componentIsNotPeriodic("force");
+	valueForce=getPntrToComponent("force");
 
 	checkRead();
 
@@ -948,14 +958,9 @@ void ITS_Bias::calculate()
 	if(!only_bias)
 		setOutputForce(0,bias_force);
 
-	
 	valueEnergy->set(shift_energy);
-	
-	if(is_debug)
-	{
-		valueForce->set(bias_force);
-	}
-	
+	valueForce->set(eff_factor);
+
 	if(potdis_output)
 	{
 		if(step%potdis_step==0 && energy<pot_max && energy>pot_min)
@@ -1207,6 +1212,9 @@ void ITS_Bias::fb_iteration()
 	
 	// ratio[k]=log[m_k(t)]
 	std::vector<double> ratio;
+	std::vector<double> old_fb;
+	if(is_debug)
+		old_fb=fb;
 	if(mcycle==start_cycle&&!read_norm)
 	{
 		for(unsigned i=0;i!=nreplica-1;++i)
@@ -1290,9 +1298,11 @@ void ITS_Bias::fb_iteration()
 			else
 				odebug.printField("temperature",int_temps[i]);
 			odebug.printField("betak",betak[i]);
-			odebug.printField("rbfb",rbfb[i]);
 			odebug.printField("fb",fb[i]);
-			odebug.printField("norml",norml[i]);
+			odebug.printField("old_fb",old_fb[i]);
+			odebug.printField("rbfb",rbfb[i]);
+			odebug.printField("rct",fb_rct[i]);
+			odebug.printField("rct_rbfb",(fb_rct[i]-old_fb[i])/betak[i]);
 			odebug.printField();
 		}
 		odebug.printf("--- FB update ---\n");
@@ -1533,6 +1543,22 @@ void ITS_Bias::output_fb()
 			//~ opstrj.flush();
 		//~ }
 	}
+	if(rct_output&&mcycle%rct_stride==0)
+	{
+		orct.fmtField(" %f");
+		orct.printField("step",int(mcycle));
+		for(unsigned i=0;i!=nreplica;++i)
+		{
+			std::string id;
+			Tools::convert(i,id);
+			std::string fbid="RCT"+id;
+			if(rct_output)
+				orct.printField(fbid,fb_rct[i]);
+		}
+		orct.printField();
+		orct.flush();
+	}
+	
 	if(bias_output&&mcycle%bias_stride==0)
 		output_bias();
 }
